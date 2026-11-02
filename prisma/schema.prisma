@@ -1,0 +1,1062 @@
+// ============================================================
+//  LUUMA — Schéma Prisma
+//  "Le marché de la diaspora sénégalaise"
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+//  AUTH (better-auth)
+// ============================================================
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  phone        String   @unique
+
+  // `name` reste le nom d'affichage — c'est lui que voient les autres et que
+  // better-auth alimente. Prénom et nom sont conservés à part pour les
+  // documents et l'identification, mais l'app affiche toujours `name`.
+  name         String
+  firstName    String?
+  lastName     String?
+
+  avatar       String?
+  emailVerified Boolean @default(false)
+  phoneVerified Boolean @default(false)
+
+  // --- Acceptation des conditions ---
+  //
+  // La VERSION est aussi importante que la date. Une case cochée sans trace
+  // ne prouve rien : le jour d'un litige, la question est « quelles
+  // conditions avait-il acceptées ». Et quand les CGU changent, c'est cette
+  // colonne qui permet de savoir à qui redemander son accord.
+  termsAcceptedAt DateTime?
+  termsVersion    String?
+
+  // Consentement marketing, séparé et facultatif. Le regrouper avec les CGU
+  // le rendrait invalide : un consentement doit être libre et spécifique,
+  // donc refusable sans empêcher l'inscription.
+  marketingConsentAt DateTime?
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // better-auth relations
+  sessions     Session[]
+  accounts     Account[]
+
+  // Accès à l'administration, une ligne par session élevée.
+  adminAccess  AdminAccess[]
+
+  // Rôles
+  roles        UserRole[]
+
+  // Profils métier
+  merchant     Merchant?
+  gp           GP?
+
+  // Relations
+  orders           Order[]         @relation("ClientOrders")
+  sentMessages     Message[]       @relation("SentMessages")
+  notifications    Notification[]
+  reviewsGiven     Review[]        @relation("ReviewsGiven")
+  reviewsReceived  Review[]        @relation("ReviewsReceived")
+  disputes         Dispute[]       @relation("DisputeReporter")
+  payments         Payment[]       @relation("PaymentRecipient")
+  following        Follow[]        @relation("Follower")
+  favorites        Favorite[]
+  addresses        Address[]
+  stories          Story[]         @relation("StoryAuthor")
+  storyViews       StoryView[]
+  chatMembers      ChatMember[]
+
+  @@map("users")
+}
+
+// ============================================================
+//  ADRESSES DE LIVRAISON
+// ============================================================
+
+// Enregistrées pour éviter de ressaisir l'adresse à chaque commande — la
+// première cause d'abandon au paiement sur mobile. `Order` garde malgré tout
+// une copie figée de l'adresse : modifier son carnet ne doit pas réécrire
+// l'historique d'une livraison déjà effectuée.
+model Address {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  label     String   // "Domicile", "Bureau"
+  address   String
+  city      String
+  country   String   // code ISO 2 lettres
+  postCode  String?
+  isDefault Boolean  @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@map("addresses")
+}
+
+// ============================================================
+//  FAVORIS
+// ============================================================
+
+// Uniquement des produits. Mettre une boutique en favori ferait doublon avec
+// l'abonnement : l'écran Favoris affiche les produits enregistrés d'un côté,
+// les abonnements de l'autre, sans second mécanisme redondant.
+model Favorite {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, productId])
+  @@index([productId])
+  @@map("favorites")
+}
+
+// ============================================================
+//  DEVISES
+// ============================================================
+
+// Taux de change flottants, rafraîchis une fois par jour depuis les taux de
+// référence de banques centrales.
+//
+// Ni XOF ni EUR n'y figurent : le franc CFA est arrimé à l'euro à 655,957 par
+// convention, ce n'est pas une cotation de marché. Seules les devises qui
+// bougent réellement sont stockées, et toute conversion passe par l'euro —
+// XOF → EUR au taux fixe, puis EUR → devise cible.
+model ExchangeRate {
+  // Code ISO 4217 : « USD », « GBP », « CAD ».
+  currency String @id
+
+  // Unités de cette devise pour 1 EUR.
+  perEur Float
+
+  // Date de la COTATION, pas de l'enregistrement. C'est elle qu'on affiche à
+  // l'utilisateur — « taux du 2 septembre » — pour ne jamais présenter comme
+  // frais un taux qui ne l'est plus.
+  quotedAt DateTime
+
+  updatedAt DateTime @updatedAt
+
+  @@map("exchange_rates")
+}
+
+// ============================================================
+//  GLOSSAIRE
+// ============================================================
+
+// Vocabulaire du commerce sénégalais : bazin, thiouraye, ngalax, netetou…
+//
+// Un glossaire et non une traduction automatique, parce que les descriptions
+// sont MIXTES — du français parsemé de wolof. Un moteur de traduction détecte
+// « français », traduit le français, et laisse les mots wolof intacts ou les
+// invente. Ici chaque terme porte une explication écrite à la main, ce qui est
+// à la fois plus juste et plus utile qu'un mot-à-mot : « thiouraye » ne se
+// traduit pas, il s'explique.
+model GlossaryTerm {
+  id String @id @default(cuid())
+
+  // Forme normalisée — minuscules, sans accent — qui sert de clé de
+  // rapprochement avec le texte des descriptions.
+  slug String @unique
+
+  // Forme affichée : « Thiouraye ».
+  term String
+
+  // Variantes orthographiques, normalisées elles aussi. Le wolof commercial
+  // n'a pas de graphie unique : « thiouraye », « tiouraye », « churai » et
+  // « cuuraay » désignent la même chose.
+  aliases String[]
+
+  // Regroupement d'affichage : « tissu », « alimentaire », « vêtement »…
+  category String?
+
+  // Explications par code de langue : { "fr": "…", "en": "…", "it": "…" }.
+  // Un objet plutôt qu'une table fille : on lit toujours toutes les langues
+  // d'un terme d'un coup, et jamais une langue seule à travers tous les termes.
+  translations Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("glossary_terms")
+}
+
+// ============================================================
+//  ABONNEMENTS
+// ============================================================
+
+// Un utilisateur suit une boutique OU un GP — jamais les deux sur la même
+// ligne. Deux colonnes nullables plutôt que deux tables : le fil doit
+// pouvoir lire l'ensemble des abonnements d'un utilisateur en une requête.
+//
+// Postgres considère les NULL comme distincts, donc `@@unique` n'empêche pas
+// les lignes où les deux colonnes sont nulles : la cohérence est vérifiée
+// dans FollowsService.
+model Follow {
+  id         String    @id @default(cuid())
+  followerId String
+  follower   User      @relation("Follower", fields: [followerId], references: [id], onDelete: Cascade)
+
+  merchantId String?
+  merchant   Merchant? @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  gpId       String?
+  gp         GP?       @relation(fields: [gpId], references: [id], onDelete: Cascade)
+
+  // La cloche de l'écran d'abonnement. Suivre et être notifié sont deux
+  // gestes distincts : on suit beaucoup de comptes, on veut être alerté par
+  // quelques-uns. Activée par défaut pour les GP — être prévenu d'un départ
+  // vers sa ville est précisément la raison de les suivre.
+  notifyOnPublish Boolean @default(true)
+
+  createdAt  DateTime  @default(now())
+
+  @@unique([followerId, merchantId])
+  @@unique([followerId, gpId])
+  @@index([merchantId])
+  @@index([gpId])
+  @@map("follows")
+}
+
+// ============================================================
+//  STORIES
+// ============================================================
+
+enum StoryMediaType {
+  IMAGE
+  VIDEO
+  TEXT
+}
+
+// Publication éphémère d'une boutique ou d'un GP.
+//
+// L'auteur est un User, pas un Merchant ni un GP : le même compte peut être
+// les deux, et une story appartient à la personne. Le type d'auteur affiché
+// se déduit du profil, et `authorRole` fige lequel des deux publie.
+//
+// Visible par les abonnés et par les personnes ayant une commande en cours
+// avec l'auteur — le calcul est fait dans StoriesService, pas en base.
+model Story {
+  id        String         @id @default(cuid())
+  authorId  String
+  author    User           @relation("StoryAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+
+  // MERCHANT ou GP : sous quelle casquette la story est publiée.
+  authorRole RoleType
+
+  mediaType StoryMediaType
+  // Clé de stockage pour IMAGE et VIDEO, null pour TEXT.
+  mediaKey  String?
+  // Contenu pour TEXT, légende pour les autres.
+  text      String?
+  // Fond dégradé d'une story texte, ex. "primary" ou "gold".
+  background String?
+
+  // Cible du glissement vers le haut : « Réserver ma place » ou
+  // « Voir le produit ». Les deux sont optionnelles — une story peut
+  // n'être qu'une annonce sans destination.
+  tripId    String?
+  trip      Trip?          @relation(fields: [tripId], references: [id], onDelete: SetNull)
+  productId String?
+  product   Product?       @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  // Date de péremption, portée par la ligne plutôt que calculée : une purge
+  // par pg-boss peut ainsi supprimer en une requête indexée.
+  expiresAt DateTime
+  createdAt DateTime       @default(now())
+
+  views     StoryView[]
+
+  @@index([authorId, expiresAt])
+  @@index([expiresAt])
+  @@map("stories")
+}
+
+// Alimente l'anneau gris « déjà vue » et la liste des spectateurs côté auteur.
+model StoryView {
+  id       String   @id @default(cuid())
+  storyId  String
+  story    Story    @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  viewerId String
+  viewer   User     @relation(fields: [viewerId], references: [id], onDelete: Cascade)
+
+  viewedAt DateTime @default(now())
+
+  @@unique([storyId, viewerId])
+  @@index([viewerId])
+  @@map("story_views")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // L'élévation vers l'administration meurt avec la session.
+  adminAccess AdminAccess?
+
+  @@map("sessions")
+}
+
+// Accès à l'espace d'administration : code envoyé, puis élévation accordée.
+//
+// Le rôle ADMIN ouvre les routes ; cette table décide si la SESSION en cours a
+// le droit de s'en servir. La distinction est le fond du dispositif : un
+// navigateur laissé ouvert, un jeton recopié, un poste partagé donnent la
+// session sans donner la boîte mail.
+//
+// Une ligne par session, pas par utilisateur : élever un compte élèverait du
+// même coup tous ses appareils, y compris celui d'un intrus.
+//
+// Les deux états cohabitent dans la même ligne — code en attente
+// (`codeHash`, `codeExpiresAt`, `attempts`) puis élévation obtenue
+// (`elevatedAt`, `expiresAt`) — parce qu'ils décrivent une seule chose : où en
+// est cette session dans son accès à l'administration.
+model AdminAccess {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // La session better-auth. Unique : une session n'a qu'un état d'accès à la
+  // fois, et demander un nouveau code remplace le précédent.
+  //
+  // La relation est déclarée pour que la base fasse respecter l'invariant :
+  // pas de session, pas d'élévation. Sans elle, les lignes survivaient à la
+  // déconnexion et s'accumulaient, parfois avec un code jamais consommé.
+  sessionId String  @unique
+  session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  // Le code n'est jamais stocké en clair. Un accès en lecture à la base ne
+  // doit pas suffire à entrer dans l'administration — ce serait reconstituer
+  // par la base ce qu'on protège par l'email.
+  codeHash      String?
+  codeExpiresAt DateTime?
+  attempts      Int       @default(0)
+
+  // Élévation obtenue. `expiresAt` est calculé à la validation ; il vaut par
+  // défaut l'expiration de la session, et se resserre par ADMIN_ELEVATION_TTL.
+  elevatedAt DateTime?
+  expiresAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@map("admin_access")
+}
+
+model Account {
+  id           String  @id @default(cuid())
+  userId       String
+  user         User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider     String
+  providerId   String
+  accessToken  String?
+  refreshToken String?
+  expiresAt    DateTime?
+  password     String? // hashed credential password (better-auth emailAndPassword)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([provider, providerId])
+  @@map("accounts")
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("verifications")
+}
+
+// ============================================================
+//  RÔLES
+// ============================================================
+
+enum RoleType {
+  CLIENT
+  MERCHANT
+  GP
+  ADMIN
+}
+
+model UserRole {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      RoleType
+  createdAt DateTime @default(now())
+
+  @@unique([userId, role])
+  @@map("user_roles")
+}
+
+// ============================================================
+//  PROFIL COMMERÇANT
+// ============================================================
+
+model Merchant {
+  id          String  @id @default(cuid())
+  userId      String  @unique
+  user        User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  shopName    String
+  description String?
+  address     String
+  city        String  @default("Dakar")
+  country     String  @default("SN")
+
+  // KYC
+  idDocumentUrl  String?
+  isKycVerified  Boolean  @default(false)
+  isApproved     Boolean  @default(false)
+  rejectionNote  String?
+
+  // Paiement (Wave/OM)
+  payoutMethod   String?  // "wave" | "orange_money" | "bank"
+  payoutAccount  String?  // numéro de compte
+
+  // Stats
+  rating         Float    @default(0)
+  totalReviews   Int      @default(0)
+
+  products    Product[]
+  orderItems  OrderItem[]
+  packages    Package[]
+  followers   Follow[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("merchants")
+}
+
+// ============================================================
+//  PROFIL GP
+// ============================================================
+
+model GP {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // KYC
+  idDocumentUrl  String?
+  isKycVerified  Boolean @default(false)
+  isApproved     Boolean @default(false)
+  rejectionNote  String?
+
+  // Période d'essai : capacité limitée jusqu'à 5 voyages validés
+  totalTrips       Int   @default(0)
+  maxWeightPerTrip Float @default(5) // kg, augmente avec l'expérience
+
+  // Paiement
+  payoutMethod  String? // "wave" | "orange_money" | "bank" | "stripe"
+  payoutAccount String?
+
+  // Stats
+  rating        Float @default(0)
+  totalReviews  Int   @default(0)
+
+  trips     Trip[]
+  packages  Package[]
+  followers Follow[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("gps")
+}
+
+// ============================================================
+//  PRODUITS
+// ============================================================
+
+// Liste fermée. En texte libre, un commerçant écrit « Vêtements », un autre
+// « habits », un troisième « Vetement » — aucun filtre ne peut fonctionner.
+enum ProductCategory {
+  VETEMENTS
+  CHAUSSURES
+  BIJOUX_ACCESSOIRES
+  ALIMENTAIRE
+  COSMETIQUES
+  ARTISANAT_DECO
+  ENFANT_BEBE
+  MAISON
+  LIVRES_CULTURE
+  AUTRE
+}
+
+// Comment un produit se vend. Détermine ce qu'on demande au client avant de
+// pouvoir l'ajouter au panier — et ce n'est pas la même chose selon les cas.
+enum ProductKind {
+  SIMPLE        // un prix, un poids : bijoux, cosmétiques, épices
+  VARIANT       // prêt-à-porter : une déclinaison par couleur × taille
+  MADE_TO_ORDER // sur-mesure : le client saisit ses mesures, l'artisan coud
+  BY_LENGTH     // vendu au mètre : tissu, ruban, galon
+}
+
+// Liste fermée pour que le filtre fonctionne — « M », « m », « Medium » et
+// « Moyen » sont le même vêtement, mais quatre chaînes différentes.
+// `ProductVariant.sizeLabel` reste libre pour l'affichage : la coupe
+// sénégalaise ne se laisse pas toujours réduire à ces huit valeurs.
+enum ProductSize {
+  XS
+  S
+  M
+  L
+  XL
+  XXL
+  XXXL
+  ONE_SIZE
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  merchantId  String
+  merchant    Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  kind        ProductKind @default(SIMPLE)
+
+  name        String
+  description String?
+  // Prix et poids de RÉFÉRENCE. Pour un produit décliné, chaque variante peut
+  // les redéfinir ; ceux-ci servent alors d'affichage « à partir de » et de
+  // repli si une variante ne précise rien.
+  //
+  // Pour BY_LENGTH, ils s'entendent PAR UNITÉ : 4 000 FCFA et 180 g le mètre.
+  price       Float    // en XOF (FCFA)
+  priceEur    Float?   // converti automatiquement
+  weight      Float    // poids estimé en kg
+
+  // --- Vente au mètre ---
+  // Unité affichée (« mètre », « yard ») et longueur minimale commandable.
+  // Nuls pour tout autre `kind`.
+  unitLabel   String?
+  minQuantity Float?
+
+  // --- Sur-mesure ---
+  // Délai de confection en jours. Contrainte métier qui en découle : on ne
+  // peut pas confier un article sur-mesure à un GP qui part avant la fin de
+  // la confection — vérifié à la commande, pas seulement à l'affichage.
+  productionDays Int?
+  // Mesures exigées du client, en clés stables : « tour_poitrine »,
+  // « tour_taille », « longueur_dos ». Le libellé affiché est côté client.
+  requiredMeasurements String[]
+
+  images      String[] // clés de stockage
+  variants    ProductVariant[]
+  category    ProductCategory @default(AUTRE)
+  // Sous-catégorie libre : « boubou », « bazin homme »… Trop mouvante pour
+  // une énumération, mais utile à la recherche plein texte.
+  subCategory String?
+  isAvailable Boolean  @default(true)
+
+  // Compteur dénormalisé, affiché au commerçant. Un incrément suffit : tracer
+  // chaque vue individuellement coûterait une ligne par consultation pour une
+  // information qu'on ne lit qu'agrégée.
+  viewCount   Int      @default(0)
+
+  orderItems  OrderItem[]
+  favorites   Favorite[]
+  stories     Story[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([merchantId, isAvailable])
+  @@index([category, isAvailable])
+  @@map("products")
+}
+
+// Une déclinaison achetable : une couleur, une taille, ou les deux.
+//
+// L'équivalent du SKU de Shein, à une différence près qui compte ici : le
+// POIDS est porté par la déclinaison, pas seulement le prix. Un boubou en 3XL
+// pèse 300 à 400 g de plus qu'un XS, et chez nous le poids n'est pas
+// décoratif — c'est lui qui fixe le tarif du GP et qui est réservé sur la
+// capacité du trajet au moment du paiement. Un poids unique par produit
+// donnerait des GP sous-payés et des capacités fausses.
+model ProductVariant {
+  id        String  @id @default(cuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  // Nulle pour un tissu : une couleur, pas de taille.
+  size      ProductSize?
+  // Libellé affiché s'il diffère de l'énumération : « 42/44 », « Taille unique ».
+  sizeLabel String?
+
+  colorName String? // « Bleu indigo » — ce que lit le client
+  colorHex  String? // « #1B3A6B » — la pastille de sélection
+
+  // Poids ABSOLU de cette déclinaison, en kg. Volontairement pas un écart au
+  // produit parent : un commerçant sait ce que pèse son XL, il ne sait pas
+  // dire « +200 g par rapport à quoi ».
+  weight    Float
+  // Nul = on retombe sur le prix du produit. La plupart des déclinaisons ne
+  // changent pas le prix, les obliger à le répéter inviterait la divergence.
+  price     Float?
+
+  // Nul = stock non suivi, cas d'un artisan qui refait à la demande.
+  stock     Int?
+  // Photos propres à la couleur. Vides = celles du produit.
+  images    String[]
+
+  isAvailable Boolean @default(true)
+
+  orderItems OrderItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Postgres considère deux NULL comme distincts : cette contrainte n'empêche
+  // donc PAS deux variantes « bleu, sans taille ». L'unicité réelle est
+  // vérifiée dans ProductsService, comme pour Follow.
+  @@unique([productId, size, colorName])
+  @@index([productId, isAvailable])
+  @@map("product_variants")
+}
+
+// ============================================================
+//  TRAJETS GP
+// ============================================================
+
+enum TripStatus {
+  UPCOMING      // pas encore parti
+  COLLECTING    // en attente des colis
+  IN_TRANSIT    // en voyage
+  COMPLETED
+  CANCELLED
+}
+
+model Trip {
+  id          String     @id @default(cuid())
+  gpId        String
+  gp          GP         @relation(fields: [gpId], references: [id], onDelete: Cascade)
+
+  originCity    String   // ex: "Dakar"
+  originCountry String   @default("SN")
+  destCity      String   // ex: "Paris"
+  destCountry   String   // ex: "FR"
+
+  departureDate DateTime
+  arrivalDate   DateTime?
+
+  pricePerKg  Float      // en EUR
+  maxWeight   Float      // kg disponibles au total
+  usedWeight  Float      @default(0) // mis à jour à chaque colis accepté
+
+  status      TripStatus @default(UPCOMING)
+
+  // KYC voyage
+  flightTicketUrl String?
+
+  packages    Package[]
+  stories     Story[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([destCity, destCountry, departureDate, status])
+  @@map("trips")
+}
+
+// ============================================================
+//  COMMANDES
+// ============================================================
+
+enum OrderStatus {
+  PENDING       // client a sélectionné produits, pas encore payé
+  CONFIRMED     // paiement escrow effectué, GP notifié
+  COLLECTING    // marchands envoient les colis au GP
+  IN_TRANSIT    // GP en voyage
+  DELIVERED     // client a confirmé réception
+  CANCELLED
+  DISPUTED
+  REFUNDED
+}
+
+model Order {
+  id       String      @id @default(cuid())
+  clientId String
+  client   User        @relation("ClientOrders", fields: [clientId], references: [id])
+
+  status   OrderStatus @default(PENDING)
+
+  // Montants
+  subtotalEur    Float  // somme produits convertis
+  shippingEur    Float  // frais GP (poids × prix/kg)
+  platformFeeEur Float  // commission Luuma (~6%)
+  totalEur       Float  // total payé par le client
+
+  // Livraison
+  deliveryAddress String
+  deliveryCity    String
+  deliveryCountry String
+
+  items     OrderItem[]
+  packages  Package[]
+  payments  Payment[]
+  chat      Chat?
+  dispute   Dispute?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([clientId, status])
+  @@map("orders")
+}
+
+// ============================================================
+//  ARTICLES DE COMMANDE
+// ============================================================
+
+enum ItemStatus {
+  PENDING
+  PREPARING
+  HANDED_TO_GP
+  IN_TRANSIT
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+model OrderItem {
+  id         String     @id @default(cuid())
+  orderId    String
+  order      Order      @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId  String
+  product    Product    @relation(fields: [productId], references: [id])
+  // Nul pour un produit sans déclinaison, ou pour du sur-mesure.
+  variantId  String?
+  variant    ProductVariant? @relation(fields: [variantId], references: [id])
+  merchantId String
+  merchant   Merchant   @relation(fields: [merchantId], references: [id])
+  packageId  String?
+  package    Package?   @relation(fields: [packageId], references: [id])
+
+  // Décimale, et non plus entière : un tissu se commande en 2,5 mètres. Pour
+  // tous les autres `kind`, la valeur reste un entier, vérifié à la commande.
+  quantity  Float
+  unitPrice Float      // prix en EUR au moment de la commande
+  weight    Float      // poids en kg
+
+  // Ce qui a été choisi, figé en toutes lettres au moment de la commande.
+  // La variante peut être renommée ou supprimée ensuite ; la facture, le
+  // bordereau du colis et le litige éventuel doivent rester lisibles.
+  variantLabel String?
+
+  // Mesures saisies par le client pour un article sur-mesure, en clé/valeur
+  // (centimètres). Figées ici : ce sont elles qui font foi si le vêtement ne
+  // tombe pas juste, pas le profil du client au moment de la réclamation.
+  measurements Json?
+
+  status    ItemStatus @default(PENDING)
+
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  @@map("order_items")
+}
+
+// ============================================================
+//  COLIS (lien entre une commande et un GP)
+// ============================================================
+
+enum PackageStatus {
+  AWAITING_DROPOFF   // marchand n'a pas encore envoyé
+  DROPPED_OFF        // marchand a envoyé un livreur
+  RECEIVED_BY_GP     // GP a confirmé réception
+  IN_TRANSIT
+  DELIVERED
+  REFUSED            // GP a refusé ce colis
+  CANCELLED
+}
+
+model Package {
+  id         String        @id @default(cuid())
+  orderId    String
+  order      Order         @relation(fields: [orderId], references: [id])
+  gpId       String
+  gp         GP            @relation(fields: [gpId], references: [id])
+  tripId     String
+  trip       Trip          @relation(fields: [tripId], references: [id])
+  merchantId String
+  merchant   Merchant      @relation(fields: [merchantId], references: [id])
+
+  status     PackageStatus @default(AWAITING_DROPOFF)
+  weight     Float         // poids total du colis
+
+  // Photos obligatoires à chaque étape
+  prepPhotoUrl      String? // par le marchand
+  receptionPhotoUrl String? // par le GP à la réception
+  deliveryPhotoUrl  String? // à la livraison
+
+  refusalReason String? // si REFUSED
+
+  items      OrderItem[]
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([tripId, status])
+  @@map("packages")
+}
+
+// ============================================================
+//  PAIEMENTS & ESCROW
+// ============================================================
+
+enum PaymentType {
+  ESCROW_HOLD      // client paye → fonds bloqués
+  MERCHANT_PAYOUT  // libération vers le marchand (FCFA)
+  GP_PAYOUT        // libération vers le GP (EUR)
+  PLATFORM_FEE     // commission Luuma
+  REFUND
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+model Payment {
+  id          String        @id @default(cuid())
+  orderId     String
+  order       Order         @relation(fields: [orderId], references: [id])
+
+  type        PaymentType
+  status      PaymentStatus @default(PENDING)
+
+  amount      Float
+  currency    String        // "EUR" | "XOF"
+
+  recipientId String?
+  recipient   User?         @relation("PaymentRecipient", fields: [recipientId], references: [id])
+
+  // Références externes
+  stripeId    String?       // Stripe PaymentIntent ou Transfer ID
+  waveRef     String?       // Wave reference
+  omRef       String?       // Orange Money reference
+
+  metadata    Json?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([orderId, type])
+  @@map("payments")
+}
+
+// ============================================================
+//  CHAT & MESSAGES
+// ============================================================
+
+enum MessageType {
+  TEXT
+  IMAGE
+  VOICE  // 🎙️ message vocal
+  FILE
+  // Événement inséré par le serveur : « le GP a refusé le colis »,
+  // « la commande est confirmée ». La conversation devient ainsi
+  // l'historique complet de la commande, sans écran de suivi séparé.
+  SYSTEM
+}
+
+enum ChatKind {
+  ORDER   // client, commerçants et GP d'une commande
+  DIRECT  // deux personnes, hors commande
+}
+
+// Conversation.
+//
+// `orderId` devient optionnel : un client doit pouvoir écrire à un GP AVANT
+// de commander — « vous passez par Lyon ? », « vous prenez du fragile ? ».
+// L'exiger interdisait toute prise de contact préalable, alors que c'est
+// précisément là que la confiance se construit.
+//
+// La liste des participants est explicite (ChatMember) au lieu d'être
+// déduite de la commande : c'est le seul moyen de gérer les deux formes avec
+// un contrôle d'accès unique.
+model Chat {
+  id      String    @id @default(cuid())
+  kind    ChatKind  @default(ORDER)
+
+  orderId String?   @unique
+  order   Order?    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  members  ChatMember[]
+  messages Message[]
+
+  // Dénormalisé pour trier la liste des conversations sans agréger les
+  // messages à chaque affichage.
+  lastMessageAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([lastMessageAt])
+  @@map("chats")
+}
+
+model ChatMember {
+  id     String @id @default(cuid())
+  chatId String
+  chat   Chat   @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Sert au badge de non-lus sans parcourir tous les messages.
+  lastReadAt DateTime?
+  joinedAt   DateTime  @default(now())
+
+  @@unique([chatId, userId])
+  @@index([userId])
+  @@map("chat_members")
+}
+
+model Message {
+  id       String      @id @default(cuid())
+  chatId   String
+  chat     Chat        @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  senderId String
+  sender   User        @relation("SentMessages", fields: [senderId], references: [id])
+
+  type     MessageType @default(TEXT)
+  content  String?     // texte
+  fileUrl  String?     // URL R2 (image / vocal / fichier)
+  duration Int?        // durée en secondes pour les vocaux
+  isRead   Boolean     @default(false)
+
+  createdAt DateTime   @default(now())
+
+  @@index([chatId, createdAt])
+  @@map("messages")
+}
+
+// ============================================================
+//  AVIS & NOTES
+// ============================================================
+
+enum ReviewType {
+  CLIENT_TO_GP
+  CLIENT_TO_MERCHANT
+  GP_TO_CLIENT
+  GP_TO_MERCHANT
+  MERCHANT_TO_GP
+}
+
+model Review {
+  id         String     @id @default(cuid())
+  orderId    String
+  reviewerId String
+  reviewer   User       @relation("ReviewsGiven", fields: [reviewerId], references: [id])
+  revieweeId String
+  reviewee   User       @relation("ReviewsReceived", fields: [revieweeId], references: [id])
+
+  type       ReviewType
+  rating     Int        // 1 à 5
+  comment    String?
+
+  createdAt  DateTime   @default(now())
+
+  @@unique([orderId, reviewerId, revieweeId])
+  @@map("reviews")
+}
+
+// ============================================================
+//  NOTIFICATIONS
+// ============================================================
+
+enum NotifType {
+  ORDER_CONFIRMED
+  PACKAGE_HANDED_TO_GP
+  PACKAGE_RECEIVED_BY_GP
+  GP_IN_TRANSIT
+  ORDER_DELIVERED
+  NEW_MESSAGE
+  PAYMENT_RELEASED
+  GP_CANCELLED_TRIP
+  PACKAGE_REFUSED
+  KYC_APPROVED
+  KYC_REJECTED
+  DISPUTE_OPENED
+  DISPUTE_RESOLVED
+}
+
+model Notification {
+  id      String    @id @default(cuid())
+  userId  String
+  user    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type    NotifType
+  title   String
+  body    String
+  data    Json?     // données contextuelles (orderId, packageId...)
+  isRead  Boolean   @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
+
+// ============================================================
+//  LITIGES
+// ============================================================
+
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED_CLIENT   // remboursement client
+  RESOLVED_MERCHANT // paiement marchand confirmé
+  CLOSED
+}
+
+model Dispute {
+  id         String        @id @default(cuid())
+  orderId    String        @unique
+  order      Order         @relation(fields: [orderId], references: [id])
+  reporterId String
+  reporter   User          @relation("DisputeReporter", fields: [reporterId], references: [id])
+
+  reason      String
+  description String
+  status      DisputeStatus @default(OPEN)
+  resolution  String?
+  resolvedAt  DateTime?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("disputes")
+}
