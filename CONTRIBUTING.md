@@ -6,21 +6,22 @@ Promote work through pull requests in this order:
 
 `feature/*` → `develop` → `staging` → `preprod` → `main`
 
-- Branch features and fixes from `develop`, then open a pull request into `develop`.
-- Promote each integrated version with a pull request to the next branch.
+- Create feature and fix branches from `develop`, then open a PR into `develop`.
+- Promote each integrated version with a PR to the next branch in the sequence.
 - Do not push directly to the shared environment branches.
-- `develop` is the intended default branch; `main` contains production-ready code.
+- `develop` is the intended default branch; `main` contains the production-ready version.
 
 ## Pull request requirements
 
-Require the `Backend build` check before merging pull requests into `develop`, `staging`, `preprod`, and `main`.
+The GitHub branch rules should require both CI checks to pass before merging:
 
-Require no review approval for `develop`. Require at least one approved review for `staging`, `preprod`, and `main`.
+- `Backend build`
+- `Frontend Android export`
 
-Configure these rules in GitHub repository settings; the workflow cannot enforce branch protection by itself.
+Require no review approval for PRs into `develop`. Require at least one approved review for PRs into `staging`, `preprod`, and `main`.
 
-## Continuous integration and deployment
+These are repository settings in GitHub and are not configured by the workflow itself.
 
-`.github/workflows/ci.yml` runs `npm ci`, generates the Prisma client, and builds the NestJS application on pull requests and pushes to the four shared branches.
+## Continuous integration
 
-This workflow provides CI only. Configure deployment separately once the hosting target, environments, migration policy, and required secrets have been decided.
+`.github/workflows/ci.yml` runs for PRs targeting, and pushes to, `develop`, `staging`, `preprod`, and `main`. It installs each application's locked dependencies, generates the Prisma client, builds the NestJS backend, and exports the Expo frontend for Android. This workflow validates builds only; it does not deploy either application.

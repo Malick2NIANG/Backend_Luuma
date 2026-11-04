@@ -1,0 +1,63 @@
+name: luum
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: luum-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: luum
+      POSTGRES_PASSWORD: luum
+      POSTGRES_DB: luum_db
+    ports:
+      - "5435:5432"
+    volumes:
+      - luum_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U luum -d luum_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Stockage S3 auto-hébergé : photos produits, documents KYC, photos de
+  # colis et messages vocaux. Même API que S3/R2, donc le code applicatif
+  # reste identique si l'hébergement change un jour.
+  minio:
+    image: minio/minio:latest
+    container_name: luum-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: luum
+      MINIO_ROOT_PASSWORD: luumluum
+    ports:
+      - "9000:9000" # API S3
+      - "9001:9001" # console web (http://localhost:9001)
+    volumes:
+      - luum_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Conteneur éphémère : crée les buckets au premier démarrage puis s'arrête.
+  # Sans lui, il faudrait cliquer dans la console MinIO à chaque `up -v`.
+  minio-init:
+    image: minio/mc:latest
+    container_name: luum-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set luum http://minio:9000 luum luumluum;
+      mc mb --ignore-existing luum/luum-public;
+      mc mb --ignore-existing luum/luum-private;
+      mc anonymous set download luum/luum-public;
+      echo 'Buckets prêts : luum-public (lecture publique), luum-private (présigné uniquement)';
+      "
+
+volumes:
+  luum_postgres_data:
+  luum_minio_data:

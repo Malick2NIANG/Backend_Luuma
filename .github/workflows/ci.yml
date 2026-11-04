@@ -1,4 +1,4 @@
-name: Backend CI
+name: Luuma Backend CI
 
 "on":
   pull_request:
@@ -18,7 +18,7 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  backend:
     name: Backend build
     runs-on: ubuntu-latest
     steps:
@@ -29,6 +29,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: package-lock.json
       - name: Install dependencies
         run: npm ci
       - name: Generate Prisma client

@@ -24,3 +24,4 @@ CREATE TABLE "glossary_terms" (
 
 -- CreateIndex
 CREATE UNIQUE INDEX "glossary_terms_slug_key" ON "glossary_terms"("slug");
+

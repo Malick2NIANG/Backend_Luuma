@@ -1,7 +1,22 @@
+# dependencies
 node_modules/
+
+# build output
 dist/
-coverage/
+build/
+
+# env files
 .env
-.env.*
-!.env.example
+.env.local
+.env.*.local
+
+# typescript
 *.tsbuildinfo
+
+# logs
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# OS
+.DS_Store

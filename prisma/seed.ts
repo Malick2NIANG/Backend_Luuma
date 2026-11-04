@@ -1,18 +1,30 @@
 /**
  * Données de test pour les déclinaisons produit.
  *
- * Idempotent et non destructif : cherche « Chez Awa Couture » par son nom
- * plutôt que d'en recréer un, et n'ajoute que les 3 produits ci-dessous s'ils
- * n'existent pas déjà. Les autres données (utilisateurs, commandes, stories,
- * favoris, autres commerçants) ne sont ni lues ni modifiées.
+ * Idempotent : cherche « Chez Awa Couture » par son nom plutôt que d'en
+ * recréer un, crée les produits manquants et actualise uniquement les photos
+ * et descriptions de ces trois produits. Les autres données ne sont pas modifiées.
  *
  *   npm run db:seed
  */
 import 'dotenv/config';
-import { PrismaClient, ProductCategory, ProductKind, ProductSize } from '@prisma/client';
+import {
+  PrismaClient,
+  ProductCategory,
+  ProductKind,
+  ProductSize,
+} from '@prisma/client';
 import { xofToEur } from '../src/common/currency';
 
 const prisma = new PrismaClient();
+
+const productImages = {
+  boubou:
+    'https://images.pexels.com/photos/31485660/pexels-photo-31485660.jpeg?auto=compress&w=1200',
+  bazin:
+    'https://images.pexels.com/photos/30452332/pexels-photo-30452332/free-photo-of-man-in-traditional-african-attire-standing-indoors.jpeg?auto=compress&w=1200',
+  wax: 'https://images.pexels.com/photos/8655023/pexels-photo-8655023.jpeg?auto=compress&w=1200',
+} as const;
 
 async function main(): Promise<void> {
   const merchant = await prisma.merchant.findFirst({
@@ -49,7 +61,15 @@ async function seedVariantProduct(merchantId: string): Promise<void> {
     select: { id: true },
   });
   if (existing) {
-    console.log(`Déjà présent : « ${name} ». Ignoré.`);
+    await prisma.product.update({
+      where: { id: existing.id },
+      data: {
+        images: [productImages.boubou],
+        description:
+          "Photo d'illustration. Boubou brodé en tissu wax, coupe traditionnelle.",
+      },
+    });
+    console.log(`Photo d'illustration actualisée : « ${name} ».`);
     return;
   }
 
@@ -59,11 +79,12 @@ async function seedVariantProduct(merchantId: string): Promise<void> {
       merchantId,
       kind: ProductKind.VARIANT,
       name,
-      description: 'Boubou brodé en tissu wax, coupe traditionnelle.',
+      description:
+        "Photo d'illustration. Boubou brodé en tissu wax, coupe traditionnelle.",
       price,
       priceEur: xofToEur(price),
       weight: 1.0, // repli si une variante ne précise rien
-      images: ['https://picsum.photos/seed/awa-boubou/600/800'],
+      images: [productImages.boubou],
       category: ProductCategory.VETEMENTS,
       subCategory: 'boubou',
       variants: {
@@ -129,7 +150,15 @@ async function seedMadeToOrderProduct(merchantId: string): Promise<void> {
     select: { id: true },
   });
   if (existing) {
-    console.log(`Déjà présent : « ${name} ». Ignoré.`);
+    await prisma.product.update({
+      where: { id: existing.id },
+      data: {
+        images: [productImages.bazin],
+        description:
+          "Photo d'illustration. Ensemble bazin cousu sur mesure selon vos dimensions.",
+      },
+    });
+    console.log(`Photo d'illustration actualisée : « ${name} ».`);
     return;
   }
 
@@ -139,11 +168,12 @@ async function seedMadeToOrderProduct(merchantId: string): Promise<void> {
       merchantId,
       kind: ProductKind.MADE_TO_ORDER,
       name,
-      description: 'Ensemble bazin cousu sur mesure selon vos dimensions.',
+      description:
+        "Photo d'illustration. Ensemble bazin cousu sur mesure selon vos dimensions.",
       price,
       priceEur: xofToEur(price),
       weight: 1.2,
-      images: ['https://picsum.photos/seed/awa-surmesure/600/800'],
+      images: [productImages.bazin],
       category: ProductCategory.VETEMENTS,
       subCategory: 'bazin homme',
       productionDays: 30,
@@ -163,7 +193,15 @@ async function seedByLengthProduct(merchantId: string): Promise<void> {
     select: { id: true },
   });
   if (existing) {
-    console.log(`Déjà présent : « ${name} ». Ignoré.`);
+    await prisma.product.update({
+      where: { id: existing.id },
+      data: {
+        images: [productImages.wax],
+        description:
+          "Photo d'illustration. Tissu wax haute densité, vendu au mètre.",
+      },
+    });
+    console.log(`Photo d'illustration actualisée : « ${name} ».`);
     return;
   }
 
@@ -173,11 +211,12 @@ async function seedByLengthProduct(merchantId: string): Promise<void> {
       merchantId,
       kind: ProductKind.BY_LENGTH,
       name,
-      description: 'Tissu wax haute densité, vendu au mètre.',
+      description:
+        "Photo d'illustration. Tissu wax haute densité, vendu au mètre.",
       price: pricePerMeter,
       priceEur: xofToEur(pricePerMeter),
       weight: 0.18, // kg par mètre
-      images: ['https://picsum.photos/seed/awa-tissu/600/800'],
+      images: [productImages.wax],
       category: ProductCategory.VETEMENTS,
       subCategory: 'tissu',
       unitLabel: 'mètre',
@@ -185,7 +224,9 @@ async function seedByLengthProduct(merchantId: string): Promise<void> {
     },
   });
 
-  console.log(`Créé : « ${name} » (${product.id}), ${pricePerMeter} FCFA/mètre.`);
+  console.log(
+    `Créé : « ${name} » (${product.id}), ${pricePerMeter} FCFA/mètre.`,
+  );
 }
 
 main()
