@@ -68,12 +68,23 @@ export const auth = betterAuth({
     updateAge: SESSION_UPDATE_AGE_SECONDS,
   },
   secret: process.env.BETTER_AUTH_SECRET,
-  // Le repli désigne le FRONTEND (Expo, 8082), pas l'API. Il valait 3001 — le
-  // port de l'API elle-même — ce qui n'aurait fait autoriser aucune origine
-  // réelle : better-auth aurait rejeté l'inscription en « origine non fiable »
-  // le jour où FRONTEND_URL manquerait, avec une erreur qui n'aurait rien
-  // désigné du problème.
-  trustedOrigins: [process.env.FRONTEND_URL ?? 'http://localhost:8082'],
+  /**
+   * Origines autorisées à appeler better-auth.
+   *
+   * La variable est DÉCOUPÉE sur les virgules, comme le fait déjà
+   * `buildCorsOptions`. Sans cela, renseigner deux origines — le poste local
+   * et un tunnel de démonstration, par exemple — produisait une seule chaîne
+   * « http://a,https://b » qui ne correspondait à rien : le CORS laissait
+   * passer, better-auth refusait, et l'inscription échouait en « origine non
+   * fiable » alors que la configuration paraissait juste.
+   *
+   * Le repli désigne le FRONTEND (Expo, 8082), pas l'API. Il valait 3001 — le
+   * port de l'API elle-même — ce qui n'aurait autorisé aucune origine réelle.
+   */
+  trustedOrigins: (process.env.FRONTEND_URL ?? 'http://localhost:8082')
+    .split(',')
+    .map((origin) => origin.trim().replace(/\/$/, ''))
+    .filter(Boolean),
   user: {
     fields: {
       // schema.prisma uses `avatar`, better-auth's canonical field is `image`

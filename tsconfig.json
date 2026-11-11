@@ -19,6 +19,17 @@
     "outDir": "./dist",
     "baseUrl": "./",
     "incremental": true,
+    // Le cache incrémental vit DANS dist/, et c'est ce qui règle une panne
+    // récurrente : `nest-cli.json` demande `deleteOutDir`, donc chaque
+    // démarrage vide dist/ — mais le cache, posé à la racine, survivait et
+    // affirmait à TypeScript que tout était déjà compilé. Résultat : plus
+    // aucun fichier émis, et l'API refusait de démarrer sur
+    // « Cannot find module dist/main », sans la moindre erreur de
+    // compilation pour l'expliquer.
+    //
+    // Rangé ici, le cache est supprimé en même temps que ce qu'il décrit.
+    // Les deux ne peuvent donc plus se contredire.
+    "tsBuildInfoFile": "./dist/tsconfig.tsbuildinfo",
     "skipLibCheck": true,
     "strict": true,
     "strictNullChecks": true,
