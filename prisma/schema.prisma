@@ -19,7 +19,11 @@ datasource db {
 model User {
   id           String   @id @default(cuid())
   email        String   @unique
-  phone        String   @unique
+  // Facultatif depuis la connexion Google : Google ne fournit pas de numéro.
+  // Il est alors demandé au premier passage dans l'application (écran
+  // bloquant), et reste obligatoire à l'inscription par email.
+  // Plusieurs NULL ne violent pas l'unicité dans Postgres.
+  phone        String?  @unique
 
   // `name` reste le nom d'affichage — c'est lui que voient les autres et que
   // better-auth alimente. Prénom et nom sont conservés à part pour les
@@ -67,6 +71,7 @@ model User {
   orders           Order[]         @relation("ClientOrders")
   sentMessages     Message[]       @relation("SentMessages")
   notifications    Notification[]
+  searchSignals    SearchSignal[]
   reviewsGiven     Review[]        @relation("ReviewsGiven")
   reviewsReceived  Review[]        @relation("ReviewsReceived")
   disputes         Dispute[]       @relation("DisputeReporter")
@@ -1011,6 +1016,7 @@ enum NotifType {
   KYC_REJECTED
   DISPUTE_OPENED
   DISPUTE_RESOLVED
+  ORDER_CANCELLED
 }
 
 model Notification {
@@ -1027,6 +1033,9 @@ model Notification {
   createdAt DateTime @default(now())
 
   @@index([userId, isRead])
+  // Le panneau lit les notifications d'un compte de la plus récente à la plus
+  // ancienne, page par page.
+  @@index([userId, createdAt])
   @@map("notifications")
 }
 
@@ -1059,4 +1068,27 @@ model Dispute {
   updatedAt   DateTime @updatedAt
 
   @@map("disputes")
+}
+
+// ============================================================
+//  SIGNAUX DE RECHERCHE (personnalisation du fil)
+// ============================================================
+
+/// Ce qu'un utilisateur connecté a cherché, réduit aux catégories trouvées.
+///
+/// Sert uniquement à remonter ces catégories dans son fil. Conservé 30 jours
+/// et 30 entrées au plus par compte : un intérêt d'il y a six mois n'en est
+/// plus un, et rien ne justifie de garder davantage.
+model SearchSignal {
+  id         String            @id @default(cuid())
+  userId     String
+  user       User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  query      String?
+  categories ProductCategory[]
+
+  createdAt  DateTime          @default(now())
+
+  @@index([userId, createdAt])
+  @@map("search_signals")
 }

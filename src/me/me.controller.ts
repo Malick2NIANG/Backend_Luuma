@@ -4,6 +4,7 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { AuthGuard } from '../common/guards/auth.guard';
 import { AcceptTermsDto } from './dto/accept-terms.dto';
 import { MarketingConsentDto } from './dto/marketing-consent.dto';
+import { SetPhoneDto } from './dto/set-phone.dto';
 import { MeService } from './me.service';
 
 @UseGuards(AuthGuard)
@@ -43,6 +44,17 @@ export class MeController {
    * `accepted: false`. Un consentement qu'on ne peut pas retirer d'un geste
    * n'en est pas un.
    */
+  /**
+   * Numéro de téléphone d'un compte qui n'en a pas — créé par Google.
+   *
+   * Appelé par l'écran bloquant qui suit la première connexion Google : sans
+   * numéro, ni le GP ni le livreur ne pourraient joindre le client.
+   */
+  @Post('phone')
+  setPhone(@CurrentUser() user: SessionUser, @Body() dto: SetPhoneDto) {
+    return this.me.setPhone(user.id, dto.phone);
+  }
+
   @Post('marketing-consent')
   setMarketingConsent(
     @CurrentUser() user: SessionUser,

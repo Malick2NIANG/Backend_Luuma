@@ -14,6 +14,7 @@ import {
   Prisma,
 } from '@prisma/client';
 import { computePackageRefund, roundEur } from '../common/order-pricing';
+import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   DeliverPackageDto,
@@ -44,7 +45,10 @@ const PACKAGE_DETAIL_INCLUDE = {
 
 @Injectable()
 export class PackagesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   // --- Accès ---------------------------------------------------------------
 
@@ -176,6 +180,7 @@ export class PackagesService {
         data: { status: OrderStatus.COLLECTING },
       });
 
+      await this.notifications.colisDepose(tx, id);
       return updated;
     });
   }
@@ -208,6 +213,7 @@ export class PackagesService {
         data: { status: ItemStatus.HANDED_TO_GP },
       });
 
+      await this.notifications.colisRecu(tx, id);
       return updated;
     });
   }
@@ -265,6 +271,7 @@ export class PackagesService {
         });
       }
 
+      await this.notifications.colisLivre(tx, id, pending === 0);
       return updated;
     });
   }
@@ -390,6 +397,12 @@ export class PackagesService {
         });
       }
 
+      await this.notifications.colisRefuse(
+        tx,
+        id,
+        dto.refusalReason,
+        escrowExists,
+      );
       return updated;
     });
   }

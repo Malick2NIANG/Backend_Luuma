@@ -3,6 +3,8 @@ import { prismaAdapter } from '@better-auth/prisma-adapter';
 import { PrismaClient, RoleType } from '@prisma/client';
 import { betterAuth } from 'better-auth';
 import { bearer } from 'better-auth/plugins/bearer';
+import { expo } from '@better-auth/expo';
+import { APIError } from 'better-auth/api';
 import { emailOTP } from 'better-auth/plugins';
 import { mailSingleton, otpDeliverySingleton } from '../mail/mail.singleton';
 import { passwordChangedMail } from '../mail/mail.templates';
@@ -61,6 +63,15 @@ export const auth = betterAuth({
     google: {
       clientId: process.env.GOOGLE_CLIENT_ID ?? '',
       clientSecret: process.env.GOOGLE_CLIENT_SECRET ?? '',
+      // Toujours proposer le choix du compte : sur un téléphone partagé en
+      // famille, Google reprendrait sinon le dernier compte utilisé.
+      prompt: 'select_account',
+      // Prénom et nom tels que Google les connaît : l'utilisateur n'a rien à
+      // retaper. Le téléphone, lui, n'est pas fourni (voir schema.prisma).
+      mapProfileToUser: (profile) => ({
+        firstName: profile.given_name,
+        lastName: profile.family_name,
+      }),
     },
   },
   session: {
@@ -81,21 +92,28 @@ export const auth = betterAuth({
    * Le repli désigne le FRONTEND (Expo, 8082), pas l'API. Il valait 3001 — le
    * port de l'API elle-même — ce qui n'aurait autorisé aucune origine réelle.
    */
-  trustedOrigins: (process.env.FRONTEND_URL ?? 'http://localhost:8082')
-    .split(',')
-    .map((origin) => origin.trim().replace(/\/$/, ''))
-    .filter(Boolean),
+  trustedOrigins: [
+    ...(process.env.FRONTEND_URL ?? 'http://localhost:8082')
+      .split(',')
+      .map((origin) => origin.trim().replace(/\/$/, ''))
+      .filter(Boolean),
+    // Schéma de l'application native : adresse de retour de la connexion
+    // Google. En développement, Expo Go utilise `exp://` (ajouté par le
+    // plugin `expo` quand NODE_ENV vaut development).
+    'luuma://',
+  ],
   user: {
     fields: {
       // schema.prisma uses `avatar`, better-auth's canonical field is `image`
       image: 'avatar',
     },
-    // schema.prisma declares `phone` as required + unique, so it must be
-    // accepted as sign-up input or user creation fails the NOT NULL constraint.
+    // Facultatif ici parce que la connexion Google crée des comptes sans
+    // numéro. L'inscription par email continue de l'exiger : c'est le crochet
+    // `databaseHooks.user.create.before` qui le vérifie.
     additionalFields: {
       phone: {
         type: 'string',
-        required: true,
+        required: false,
       },
 
       /**
@@ -148,6 +166,16 @@ export const auth = betterAuth({
   plugins: [
     bearer(),
     /**
+     * Retour de la connexion Google dans l'application native.
+     *
+     * Le parcours se fait dans un navigateur : la session y est créée sous
+     * forme de cookie, que l'application ne voit pas. Ce plugin ajoute ce
+     * cookie à l'adresse de retour `luuma://…`, d'où l'application extrait
+     * le jeton. Il n'agit que sur les retours vers un schéma de confiance —
+     * jamais sur une page web.
+     */
+    expo(),
+    /**
      * Code à 6 chiffres pour la vérification d'email et la réinitialisation
      * de mot de passe.
      *
@@ -195,6 +223,22 @@ export const auth = betterAuth({
   databaseHooks: {
     user: {
       create: {
+        /**
+         * Le téléphone reste obligatoire à l'inscription par email.
+         *
+         * Le schéma l'a rendu facultatif pour les comptes Google ; sans cette
+         * garde, un formulaire modifié pourrait créer un compte email sans
+         * numéro, que rien ne rattraperait ensuite.
+         */
+        before: async (user, ctx) => {
+          const phone = (user as { phone?: string | null }).phone;
+          if (ctx?.path === '/sign-up/email' && !phone?.trim()) {
+            throw new APIError('BAD_REQUEST', {
+              message: 'Le numéro de téléphone est obligatoire.',
+            });
+          }
+          return { data: user };
+        },
         after: async (user) => {
           // Every new user starts as a CLIENT; other roles (MERCHANT, GP,
           // ADMIN) are granted explicitly later. Upsert keeps this

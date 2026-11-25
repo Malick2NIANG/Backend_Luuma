@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { OrderStatus, PackageStatus, Prisma, TripStatus } from '@prisma/client';
+import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import {
@@ -57,6 +58,7 @@ export class AdminService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   // --- Commerçants ---------------------------------------------------------
@@ -83,15 +85,23 @@ export class AdminService {
     const merchant = await this.prisma.merchant.findUnique({ where: { id } });
     if (!merchant) throw new NotFoundException('Boutique introuvable.');
 
-    return this.prisma.merchant.update({
-      where: { id },
-      data: {
-        isApproved: true,
-        // Une approbation efface le motif de rejet précédent : le dossier
-        // repart propre si le commerçant avait corrigé et repostulé.
-        rejectionNote: null,
-        ...(dto.markKycVerified ? { isKycVerified: true } : {}),
-      },
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.merchant.update({
+        where: { id },
+        data: {
+          isApproved: true,
+          // Une approbation efface le motif de rejet précédent : le dossier
+          // repart propre si le commerçant avait corrigé et repostulé.
+          rejectionNote: null,
+          ...(dto.markKycVerified ? { isKycVerified: true } : {}),
+        },
+      });
+      await this.notifications.dossierDecide(tx, {
+        userId: merchant.userId,
+        role: 'MERCHANT',
+        approuve: true,
+      });
+      return updated;
     });
   }
 
@@ -99,9 +109,18 @@ export class AdminService {
     const merchant = await this.prisma.merchant.findUnique({ where: { id } });
     if (!merchant) throw new NotFoundException('Boutique introuvable.');
 
-    return this.prisma.merchant.update({
-      where: { id },
-      data: { isApproved: false, rejectionNote: dto.rejectionNote },
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.merchant.update({
+        where: { id },
+        data: { isApproved: false, rejectionNote: dto.rejectionNote },
+      });
+      await this.notifications.dossierDecide(tx, {
+        userId: merchant.userId,
+        role: 'MERCHANT',
+        approuve: false,
+        motif: dto.rejectionNote,
+      });
+      return updated;
     });
   }
 
@@ -128,13 +147,21 @@ export class AdminService {
     const gp = await this.prisma.gP.findUnique({ where: { id } });
     if (!gp) throw new NotFoundException('GP introuvable.');
 
-    return this.prisma.gP.update({
-      where: { id },
-      data: {
-        isApproved: true,
-        rejectionNote: null,
-        ...(dto.markKycVerified ? { isKycVerified: true } : {}),
-      },
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.gP.update({
+        where: { id },
+        data: {
+          isApproved: true,
+          rejectionNote: null,
+          ...(dto.markKycVerified ? { isKycVerified: true } : {}),
+        },
+      });
+      await this.notifications.dossierDecide(tx, {
+        userId: gp.userId,
+        role: 'GP',
+        approuve: true,
+      });
+      return updated;
     });
   }
 
@@ -142,9 +169,18 @@ export class AdminService {
     const gp = await this.prisma.gP.findUnique({ where: { id } });
     if (!gp) throw new NotFoundException('GP introuvable.');
 
-    return this.prisma.gP.update({
-      where: { id },
-      data: { isApproved: false, rejectionNote: dto.rejectionNote },
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.gP.update({
+        where: { id },
+        data: { isApproved: false, rejectionNote: dto.rejectionNote },
+      });
+      await this.notifications.dossierDecide(tx, {
+        userId: gp.userId,
+        role: 'GP',
+        approuve: false,
+        motif: dto.rejectionNote,
+      });
+      return updated;
     });
   }
 

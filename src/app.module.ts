@@ -4,6 +4,8 @@ import { AuthModule } from './auth/auth.module';
 import { AdminModule } from './admin/admin.module';
 import { ChatModule } from './chat/chat.module';
 import { CurrencyModule } from './currency/currency.module';
+import { AddressesModule } from './addresses/addresses.module';
+import { NotificationsModule } from './notifications/notifications.module';
 import { FavoritesModule } from './favorites/favorites.module';
 import { GlossaryModule } from './glossary/glossary.module';
 import { LegalModule } from './legal/legal.module';
@@ -39,6 +41,8 @@ import { TripsModule } from './trips/trips.module';
     ChatModule,
     AdminModule,
     FollowsModule,
+    AddressesModule,
+    NotificationsModule,
     FavoritesModule,
     FeedModule,
     SearchModule,

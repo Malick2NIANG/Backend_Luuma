@@ -182,7 +182,32 @@ export class MeService {
     };
   }
 
-  /**
+    /**
+   * Enregistre le numéro d'un compte.
+   *
+   * Refusé s'il appartient déjà à un autre compte : le numéro sert à joindre
+   * le client à la livraison, deux comptes ne peuvent pas le partager. Le
+   * message ne dit pas lequel — ce serait révéler qu'un numéro est inscrit.
+   */
+  async setPhone(userId: string, phone: string) {
+    const taken = await this.prisma.user.findFirst({
+      where: { phone, NOT: { id: userId } },
+      select: { id: true },
+    });
+    if (taken) {
+      throw new ConflictException(
+        'Ce numéro est déjà associé à un autre compte.',
+      );
+    }
+
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { phone, phoneVerified: false },
+    });
+    return this.getProfile(userId);
+  }
+
+/**
    * Enregistre l'acceptation des conditions générales.
    *
    * L'horodatage est posé par le SERVEUR, jamais transmis par le client : une

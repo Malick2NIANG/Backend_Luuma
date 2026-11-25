@@ -7,6 +7,10 @@ import {
 } from '@prisma/client';
 import { FavoritesService } from '../favorites/favorites.service';
 import { FollowsService, type FollowedIds } from '../follows/follows.service';
+import {
+  InterestsService,
+  type InterestProfile,
+} from '../interests/interests.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { FeedQueryDto } from './dto/feed-query.dto';
 
@@ -37,6 +41,13 @@ interface FeedItemBase {
   id: string;
   publishedAt: string;
   author: FeedAuthor;
+  /**
+   * Pourquoi cette publication est là, quand ce n'est pas sa date.
+   *
+   * Affiché sur la carte (« Pour vous · Bijoux ») : une recommandation qui
+   * ne dit pas d'où elle vient ressemble à une publicité.
+   */
+  raison?: { type: 'categorie'; categorie: ProductCategory };
 }
 
 export type FeedItem =
@@ -73,6 +84,60 @@ export type FeedItem =
       };
     });
 
+/** Champs de la boutique nécessaires à une carte produit du fil. */
+const PRODUCT_MERCHANT_SELECT = {
+  id: true,
+  shopName: true,
+  city: true,
+  rating: true,
+  totalReviews: true,
+  user: { select: { id: true, avatar: true } },
+  _count: { select: { followers: true } },
+} satisfies Prisma.MerchantSelect;
+
+type ProductRow = Prisma.ProductGetPayload<{
+  include: { merchant: { select: typeof PRODUCT_MERCHANT_SELECT } };
+}>;
+
+/** Une ligne produit → une carte du fil. Partagé par le fil et les suggestions. */
+function toProductItem(
+  row: ProductRow,
+  followed: FollowedIds,
+  favorited: Set<string>,
+): FeedItem {
+  return {
+    kind: 'product' as const,
+    id: `product:${row.id}`,
+    publishedAt: row.createdAt.toISOString(),
+    author: {
+      type: 'merchant' as const,
+      id: row.merchant.id,
+      userId: row.merchant.user.id,
+      // Le nom affiché est celui de la boutique, pas du gérant.
+      name: row.merchant.shopName,
+      avatar: row.merchant.user.avatar,
+      city: row.merchant.city,
+      rating: row.merchant.rating,
+      totalReviews: row.merchant.totalReviews,
+      followersCount: row.merchant._count.followers,
+      isFollowedByMe: followed.merchantIds.includes(row.merchant.id),
+    },
+    product: {
+      id: row.id,
+      name: row.name,
+      kind: row.kind,
+      description: row.description,
+      price: row.price,
+      priceEur: row.priceEur,
+      weight: row.weight,
+      images: row.images,
+      category: row.category,
+      subCategory: row.subCategory,
+      isFavorited: favorited.has(row.id),
+    },
+  };
+}
+
 /** Résultat d'une source du fil : ses éléments et l'existence d'une suite. */
 interface FeedSource {
   items: FeedItem[];
@@ -101,18 +166,22 @@ export class FeedService {
     private readonly prisma: PrismaService,
     private readonly follows: FollowsService,
     private readonly favorites: FavoritesService,
+    private readonly interests: InterestsService,
   ) {}
 
   async getFeed(dto: FeedQueryDto, userId?: string) {
     // Abonnements et favoris chargés en une fois pour toute la page : les
     // relire par publication ferait une requête par carte affichée.
-    const [followed, favorited] = await Promise.all([
+    const [followed, favorited, profil] = await Promise.all([
       userId
         ? this.follows.getFollowedIds(userId)
         : Promise.resolve<FollowedIds>({ merchantIds: [], gpIds: [] }),
       userId
         ? this.favorites.getFavoritedIds(userId)
         : Promise.resolve(new Set<string>()),
+      userId
+        ? this.interests.profileFor(userId)
+        : Promise.resolve<InterestProfile | null>(null),
     ]);
 
     const onlyFollowing = dto.scope === 'following';
@@ -122,7 +191,9 @@ export class FeedService {
     // Un utilisateur sans abonnement sur le filtre « suivis » n'a rien à voir :
     // inutile d'interroger la base.
     const noFollows =
-      onlyFollowing && followed.merchantIds.length === 0 && followed.gpIds.length === 0;
+      onlyFollowing &&
+      followed.merchantIds.length === 0 &&
+      followed.gpIds.length === 0;
 
     const before = dto.before ? new Date(dto.before) : undefined;
 
@@ -159,13 +230,132 @@ export class FeedService {
     const hasMore =
       products.hasMore || trips.hasMore || merged.length > dto.limit;
 
+    // Le curseur se calcule sur la page CHRONOLOGIQUE, avant tout
+    // réordonnancement : c'est sa publication la plus ancienne qui borne la
+    // suite. Calculé après, il sauterait ou répéterait des publications.
+    const nextCursor = this.resolveNextCursor(hasMore, page, [products, trips]);
+
+    let personnalisee = profil ? this.reordonner(page, profil, followed) : page;
+
+    const premierePage = !before && !dto.q && !dto.city;
+    if (profil && premierePage && wantsProducts && !onlyFollowing) {
+      const suggestions = await this.suggestions(
+        profil,
+        followed,
+        favorited,
+        page,
+        hasMore,
+      );
+      personnalisee = this.inserer(personnalisee, suggestions);
+    }
+
     return {
-      items: page,
+      items: personnalisee,
       // Curseur temporel. Limite connue : deux publications partageant la
       // milliseconde exacte pourraient se chevaucher en frontière de page.
       // Un curseur composite (date, id) le corrigerait si le volume l'exige.
-      nextCursor: this.resolveNextCursor(hasMore, page, [products, trips]),
+      nextCursor,
     };
+  }
+
+  // --- Personnalisation ----------------------------------------------------
+  //
+  // Le fil reste un fil de nouveautés : la date garde le dernier mot sur
+  // l'ordre général, les goûts ne font que le nuancer. Un fil entièrement
+  // trié par affinité enfermerait la personne dans trois catégories et
+  // cacherait ce qui vient de paraître — c'est-à-dire la raison d'ouvrir
+  // l'application.
+
+  /**
+   * Réordonne une page : la fraîcheur d'abord, nuancée par les goûts.
+   *
+   * Score = rang chronologique (1 → 0) + 0,6 × affinité. Une publication de
+   * la catégorie préférée peut ainsi remonter d'environ la moitié de la page,
+   * jamais passer devant tout le reste.
+   */
+  private reordonner(
+    page: FeedItem[],
+    profil: InterestProfile,
+    followed: FollowedIds,
+  ): FeedItem[] {
+    if (page.length < 2) return page;
+    const n = page.length;
+
+    const affinite = (item: FeedItem): number => {
+      if (item.kind === 'product') {
+        const categorie = profil.categories.get(item.product.category) ?? 0;
+        const suivie = followed.merchantIds.includes(item.author.id) ? 0.5 : 0;
+        return Math.min(1, categorie + suivie);
+      }
+      return followed.gpIds.includes(item.author.id) ? 0.5 : 0;
+    };
+
+    return page
+      .map((item, i) => ({ item, score: 1 - i / n + 0.6 * affinite(item) }))
+      .sort((a, b) => b.score - a.score)
+      .map(({ item }) => item);
+  }
+
+  /**
+   * Jusqu'à trois produits des catégories préférées, plus anciens que la
+   * première page — donc que la personne n'aurait pas vus en haut du fil.
+   *
+   * Récents tout de même (45 jours) : recommander un produit oublié depuis
+   * six mois, probablement épuisé, ferait plus de tort que de bien. Les
+   * favoris sont exclus — déjà vus et déjà aimés.
+   */
+  private async suggestions(
+    profil: InterestProfile,
+    followed: FollowedIds,
+    favorited: Set<string>,
+    page: FeedItem[],
+    hasMore: boolean,
+  ): Promise<FeedItem[]> {
+    const categories = profil.top.slice(0, 3);
+    // Tout le catalogue tient déjà dans la page : rien de plus à proposer.
+    if (categories.length === 0 || !hasMore) return [];
+
+    const plusAncienne = page.at(-1)?.publishedAt;
+    const depuis = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000);
+
+    const rows = await this.prisma.product.findMany({
+      where: {
+        isAvailable: true,
+        category: { in: categories },
+        id: { notIn: [...favorited] },
+        merchant: { isApproved: true },
+        createdAt: {
+          gte: depuis,
+          ...(plusAncienne ? { lt: new Date(plusAncienne) } : {}),
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 12,
+      include: { merchant: { select: PRODUCT_MERCHANT_SELECT } },
+    });
+
+    // Variété : pas deux suggestions de la même boutique.
+    const boutiques = new Set<string>();
+    const choisies = rows.filter((row) => {
+      if (boutiques.has(row.merchantId)) return false;
+      boutiques.add(row.merchantId);
+      return true;
+    });
+
+    return choisies.slice(0, 3).map((row) => ({
+      ...toProductItem(row, followed, favorited),
+      raison: { type: 'categorie' as const, categorie: row.category },
+    }));
+  }
+
+  /** Glisse les suggestions aux places 2, 6 et 10 : visibles, jamais en rafale. */
+  private inserer(page: FeedItem[], suggestions: FeedItem[]): FeedItem[] {
+    const resultat = [...page];
+    suggestions.forEach((suggestion, i) => {
+      const position = Math.min(2 + i * 4, resultat.length);
+      resultat.splice(position, 0, suggestion);
+    });
+    return resultat;
   }
 
   /**
@@ -213,7 +403,9 @@ export class FeedService {
       isAvailable: true,
       merchant: {
         isApproved: true,
-        ...(dto.city ? { city: { equals: dto.city, mode: 'insensitive' } } : {}),
+        ...(dto.city
+          ? { city: { equals: dto.city, mode: 'insensitive' } }
+          : {}),
         ...(onlyFollowing ? { id: { in: followed.merchantIds } } : {}),
       },
       ...(before ? { createdAt: { lt: before } } : {}),
@@ -231,52 +423,12 @@ export class FeedService {
       where,
       orderBy: { createdAt: 'desc' },
       take: dto.limit + 1,
-      include: {
-        merchant: {
-          select: {
-            id: true,
-            shopName: true,
-            city: true,
-            rating: true,
-            totalReviews: true,
-            user: { select: { id: true, avatar: true } },
-            _count: { select: { followers: true } },
-          },
-        },
-      },
+      include: { merchant: { select: PRODUCT_MERCHANT_SELECT } },
     });
 
-    const items: FeedItem[] = rows.map((row) => ({
-      kind: 'product' as const,
-      id: `product:${row.id}`,
-      publishedAt: row.createdAt.toISOString(),
-      author: {
-        type: 'merchant' as const,
-        id: row.merchant.id,
-        userId: row.merchant.user.id,
-        // Le nom affiché est celui de la boutique, pas du gérant.
-        name: row.merchant.shopName,
-        avatar: row.merchant.user.avatar,
-        city: row.merchant.city,
-        rating: row.merchant.rating,
-        totalReviews: row.merchant.totalReviews,
-        followersCount: row.merchant._count.followers,
-        isFollowedByMe: followed.merchantIds.includes(row.merchant.id),
-      },
-      product: {
-        id: row.id,
-        name: row.name,
-        kind: row.kind,
-        description: row.description,
-        price: row.price,
-        priceEur: row.priceEur,
-        weight: row.weight,
-        images: row.images,
-        category: row.category,
-        subCategory: row.subCategory,
-        isFavorited: favorited.has(row.id),
-      },
-    }));
+    const items: FeedItem[] = rows.map((row) =>
+      toProductItem(row, followed, favorited),
+    );
 
     return {
       items,

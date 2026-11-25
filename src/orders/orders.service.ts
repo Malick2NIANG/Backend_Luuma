@@ -17,6 +17,7 @@ import {
 } from '@prisma/client';
 import { xofToEur } from '../common/currency';
 import { computeOrderTotals, roundEur } from '../common/order-pricing';
+import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateOrderDto, OrderItemInputDto } from './dto/create-order.dto';
 import { ListOrdersDto } from './dto/list-orders.dto';
@@ -41,7 +42,10 @@ const ORDER_DETAIL_INCLUDE = {
 
 @Injectable()
 export class OrdersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   /**
    * Crée une commande au statut PENDING.
@@ -364,11 +368,14 @@ export class OrdersService {
         },
       });
 
-      return tx.order.update({
+      const confirmed = await tx.order.update({
         where: { id: order.id },
         data: { status: OrderStatus.CONFIRMED },
         include: ORDER_DETAIL_INCLUDE,
       });
+
+      await this.notifications.paiementConfirme(tx, order.id);
+      return confirmed;
     });
   }
 
@@ -559,13 +566,16 @@ export class OrdersService {
         data: { status: PackageStatus.CANCELLED },
       });
 
-      return tx.order.update({
+      const cancelled = await tx.order.update({
         where: { id: order.id },
         data: {
           status: wasConfirmed ? OrderStatus.REFUNDED : OrderStatus.CANCELLED,
         },
         include: ORDER_DETAIL_INCLUDE,
       });
+
+      await this.notifications.commandeAnnulee(tx, order.id, wasConfirmed);
+      return cancelled;
     });
   }
 }
